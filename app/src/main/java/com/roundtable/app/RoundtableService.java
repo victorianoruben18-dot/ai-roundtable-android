@@ -197,14 +197,18 @@ public class RoundtableService extends AccessibilityService {
         }
         for(int i=0;i<n.getChildCount() && !out.truncated;i++)inspect(n.getChild(i),out,pkg,depth+1);
     }
-    private static String describeResolution(SendTargetResolver.Result<AccessibilityNodeInfo> r) {
+    private String describeResolution(SendTargetResolver.Result<AccessibilityNodeInfo> r) {
         StringBuilder b=new StringBuilder(r.target==null?"未解析：":"已解析：").append(r.reason).append("；父级层数=").append(r.hops);
         for(int i=0;i<r.chain.size();i++) {
             AccessibilityNodeInfo n=r.chain.get(i);
             android.graphics.Rect bounds=new android.graphics.Rect();n.getBoundsInScreen(bounds);
             b.append("\n  层").append(i).append("：类型=").append(safeClass(n))
                 .append("；clickable=").append(n.isClickable()).append("；CLICK=").append(hasAction(n,AccessibilityNodeInfo.ACTION_CLICK))
-                .append("；可用=").append(n.isEnabled()).append("；区域=").append(bounds.toShortString());
+                .append("；可用=").append(n.isEnabled()).append("；区域=").append(bounds.toShortString()).append("；dp=").append(String.format(Locale.ROOT,"%.1fx%.1f",bounds.width()/getResources().getDisplayMetrics().density,bounds.height()/getResources().getDisplayMetrics().density));
+        }
+        if(r.target!=null) {
+            android.graphics.Rect bounds=new android.graphics.Rect();r.target.getBoundsInScreen(bounds);
+            b.append("\n  实际点击控件：类型=").append(safeClass(r.target)).append("；区域=").append(bounds.toShortString());
         }
         return b.toString();
     }
@@ -213,10 +217,11 @@ public class RoundtableService extends AccessibilityService {
         final int hops;
         SendControl(AccessibilityNodeInfo node,AccessibilityNodeInfo label,int hops) {this.node=node;this.label=label;this.hops=hops;}
     }
-    private static final class SendTree implements SendTargetResolver.Tree<AccessibilityNodeInfo> {
+    private final class SendTree implements SendTargetResolver.Tree<AccessibilityNodeInfo> {
         @Override public SendTargetResolver.Facts facts(AccessibilityNodeInfo n) {
             SendTargetResolver.Facts f=new SendTargetResolver.Facts();
             f.pkg=n.getPackageName()==null?"":n.getPackageName().toString();
+            f.density=getResources().getDisplayMetrics().density;f.windowId=n.getWindowId();
             f.visible=n.isVisibleToUser();f.enabled=n.isEnabled();
             f.inputLike=n.isEditable() || hasAction(n,AccessibilityNodeInfo.ACTION_SET_TEXT);f.password=n.isPassword();
             f.clickable=n.isClickable();f.clickAction=hasAction(n,AccessibilityNodeInfo.ACTION_CLICK);
@@ -237,7 +242,7 @@ public class RoundtableService extends AccessibilityService {
         String c=String.valueOf(n.getClassName());return c.matches("[A-Za-z0-9_.$]{1,120}")?c:"未知";
     }
     private String diagnostics(Attempt a,String phase,String reason,boolean target,Snapshot snap,boolean matches) {
-        StringBuilder b=new StringBuilder("AI 圆桌 0.2.2；Android ").append(android.os.Build.VERSION.RELEASE)
+        StringBuilder b=new StringBuilder("AI 圆桌 0.2.3；Android ").append(android.os.Build.VERSION.RELEASE).append("；density=").append(getResources().getDisplayMetrics().density)
             .append("\n目标：").append(a.pkg).append("\n步骤：").append(phase).append("\n判断：").append(reason)
             .append("\n目标在前台：").append(target).append("；控件树节点：").append(snap.nodes)
             .append("\n输入框：").append(snap.inputs.size()).append("；发送按钮：").append(snap.sends.size())
