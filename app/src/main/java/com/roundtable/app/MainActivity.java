@@ -19,8 +19,8 @@ public class MainActivity extends Activity {
     @Override public void onResume() {
         super.onResume();
         state=Store.load(this);
-        if("SENDING".equals(state.optString("status")) || ("ARMED".equals(state.optString("status")) && System.currentTimeMillis()>state.optLong("deadline"))) {
-            Store.put(state,"status","UNCERTAIN"); Store.put(state,"notice","上次操作中断或超时，请检查是否已发送；不会自动重发。"); Store.save(this,state);
+        if("SENDING".equals(state.optString("status")) || "ARMED".equals(state.optString("status"))) {
+            Store.put(state,"status","UNCERTAIN"); Store.put(state,"notice","已返回圆桌或操作中断，本次自动授权已取消；请检查是否已发送。"); Store.save(this,state);
         }
         render();
     }
@@ -33,7 +33,7 @@ public class MainActivity extends Activity {
         prompt=null; reply=null;
         ScrollView scroll=new ScrollView(this); body=new LinearLayout(this); body.setOrientation(LinearLayout.VERTICAL); body.setPadding(24,32,24,32); scroll.setFillViewport(true); scroll.addView(body); setContentView(scroll);
         scroll.setOnApplyWindowInsetsListener((v,i)->{v.setPadding(i.getSystemWindowInsetLeft(),i.getSystemWindowInsetTop(),i.getSystemWindowInsetRight(),i.getSystemWindowInsetBottom());return i;});
-        text("AI 圆桌 · 第一版");
+        text("AI 圆桌 · 0.2.0 诊断版");
         text("每次发送前确认。自动操作未经真机验证。回复必须由你检查完整性。讨论保存在本机，转发会把内容交给所选 AI 服务。复制会覆盖剪贴板。");
         button("无障碍设置（可选；手动流程无需开启）",true,()->startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         String status=state.optString("status", "NONE");
@@ -48,6 +48,10 @@ public class MainActivity extends Activity {
         }
         if(!state.has("topic")) { history(); return; }
         text("题目："+state.optString("topic")+"\n状态："+statusLabel(status)+"\n"+state.optString("notice"));
+        if(!state.optString("diagnostics").isEmpty()) {
+            text("本次界面诊断（不含聊天正文）\n"+state.optString("diagnostics"));
+            button("复制诊断信息",true,()->((android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("圆桌诊断",state.optString("diagnostics"))));
+        }
         if(!terminal) {
             text("当前：第 "+(state.optInt("turn")/state.optJSONArray("participants").length()+1)+" 轮 · "+Store.target(state));
             boolean ready=status.equals("READY");
@@ -56,6 +60,11 @@ public class MainActivity extends Activity {
             button("确认并尝试自动发送",ready,()->confirmSend(false));
             button("确认复制问题，转为手动发送",ready,()->confirmSend(true));
             button("打开当前参与者 App",true,()->openTarget());
+            button("只读页面诊断（不输入、不发送）",!status.equals("ARMED") && !status.equals("SENDING"),()->{
+                if(RoundtableService.instance==null) {message("请先开启无障碍服务。");return;}
+                Store.put(state,"diagRequested",true);Store.put(state,"capture",false);Store.put(state,"diagDeadline",System.currentTimeMillis()+15000);
+                if(persist()) {openTarget();RoundtableService.instance.begin();}
+            });
             text("在目标 App 等待回答完成。自动读取仅尝试带明确助手标签的文本，可能失败或读到旧消息。请核对来源、轮次和完整性。");
             boolean waiting=status.equals("WAITING") || status.equals("UNCERTAIN");
             button("尝试读取：打开目标 App 后返回查看候选",waiting,()->{
@@ -71,11 +80,11 @@ public class MainActivity extends Activity {
                 new AlertDialog.Builder(this).setMessage("确认这确实是当前参与者对本次问题的完整回答？保存后仍需另行确认下一次发送。").setNegativeButton("返回检查",null).setPositiveButton("确认保存",(d,w)->acceptReply(answer)).show();
             });
             button("暂停",!status.equals("PAUSED"),()->{
-                Store.put(state,"resume",ready?"READY":"UNCERTAIN"); Store.put(state,"status","PAUSED"); Store.put(state,"capture",false);
+                Store.put(state,"resume",ready?"READY":"UNCERTAIN"); Store.put(state,"status","PAUSED"); Store.put(state,"capture",false);Store.put(state,"diagRequested",false);
                 saveDrafts(); if(persist()) render();
             });
             button("继续（不会自动发送）",status.equals("PAUSED"),()->{ Store.put(state,"status",state.optString("resume","UNCERTAIN")); if(persist()) render(); });
-            button("停止讨论",true,()->new AlertDialog.Builder(this).setMessage("停止后保留记录，不再继续本次讨论。").setNegativeButton("取消",null).setPositiveButton("停止",(d,w)->{Store.put(state,"status","STOPPED"); Store.put(state,"capture",false); saveDrafts(); if(persist())render();}).show());
+            button("停止讨论",true,()->new AlertDialog.Builder(this).setMessage("停止后保留记录，不再继续本次讨论。").setNegativeButton("取消",null).setPositiveButton("停止",(d,w)->{Store.put(state,"status","STOPPED"); Store.put(state,"capture",false); Store.put(state,"diagRequested",false); saveDrafts(); if(persist())render();}).show());
         }
         text("本次记录"); records(state); history();
     }
@@ -83,7 +92,16 @@ public class MainActivity extends Activity {
         if(prompt!=null && prompt.isEnabled()) Store.put(state,"pending",prompt.getText().toString());
         if(reply!=null && reply.isEnabled()) Store.put(state,"replyDraft",reply.getText().toString());
     }
-    @Override protected void onPause() { super.onPause(); if(state!=null && state.has("topic")) { saveDrafts(); Store.save(this,state); } }
+    @Override protected void onPause() {
+        super.onPause();
+        if(state==null || !state.has("topic"))return;
+        // Merge only editor drafts; never overwrite newer service status or diagnostics.
+        JSONObject latest=Store.load(this);
+        if(latest.optLong("created")!=state.optLong("created") || latest.optInt("turn")!=state.optInt("turn"))return;
+        if(prompt!=null && prompt.isEnabled() && "READY".equals(latest.optString("status")))Store.put(latest,"pending",prompt.getText().toString());
+        if(reply!=null && reply.isEnabled())Store.put(latest,"replyDraft",reply.getText().toString());
+        Store.save(this,latest);
+    }
     private void startSession() {
         String t=topic.getText().toString().trim(); int n;
         try { n=Integer.parseInt(rounds.getText().toString()); } catch(NumberFormatException e) { n=0; }
@@ -96,18 +114,18 @@ public class MainActivity extends Activity {
         String p=prompt.getText().toString().trim();
         if(p.isEmpty() || p.length()>LIMIT) {message("请输入不超过 "+LIMIT+" 个字符的内容；过长时请手动整理，系统不会静默截断。");return;}
         final long expectedSession=state.optLong("created"); final int expectedTurn=state.optInt("turn");
-        new AlertDialog.Builder(this).setTitle("发送给 "+Store.target(state)).setMessage("请先确认目标 App 已登录，并已打开正确聊天。\n\n"+p).setNegativeButton("取消",null).setPositiveButton(manual?"确认复制":"确认尝试发送",(d,w)->{
+        new AlertDialog.Builder(this).setTitle("发送给 "+Store.target(state)).setMessage("请先确认目标 App 已登录，并已打开正确聊天。ChatGPT 请先选择“聊天”页，保持输入框为空。\n\n"+p).setNegativeButton("取消",null).setPositiveButton(manual?"确认复制":"确认尝试发送",(d,w)->{
             JSONObject current=Store.load(this);
             if(!Store.mayAuthorize(current,expectedSession,expectedTurn)) {message("状态已改变，已取消重复或过期授权。");state=current;render();return;}
             state=current;
             if(!manual && RoundtableService.instance==null) { message("请先开启无障碍服务，或使用手动流程。");return; }
             Intent launch=getPackageManager().getLaunchIntentForPackage(Store.pkg(Store.target(state)));
             if(!manual && launch==null) {message("未找到目标 App，请使用手动流程。");return;}
-            Store.put(state,"pending",p);Store.put(state,"status",manual?"WAITING":"ARMED");Store.put(state,"deadline",System.currentTimeMillis()+15000);Store.put(state,"candidate","");Store.put(state,"capture",false);
+            Store.put(state,"diagRequested",false);Store.put(state,"diagnostics","");Store.put(state,"sendPhase","等待页面稳定");Store.put(state,"pending",p);Store.put(state,"status",manual?"WAITING":"ARMED");Store.put(state,"deadline",System.currentTimeMillis()+15000);Store.put(state,"candidate","");Store.put(state,"capture",false);
             Store.put(state,"notice",manual?"请手动粘贴并发送一次，再将完整回复粘贴回来。":"已授权一次发送，15 秒内有效；识别失败时不会重试。");
             if(!persist())return;
             if(manual) { ((android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("圆桌问题",p)); render(); }
-            else { try {startActivity(launch);}catch(RuntimeException e){Store.put(state,"status","UNCERTAIN");persist();render();} }
+            else { try {startActivity(launch);if(RoundtableService.instance!=null)RoundtableService.instance.begin();}catch(RuntimeException e){Store.put(state,"status","UNCERTAIN");persist();render();} }
         }).show();
     }
     private void openTarget() {
@@ -117,7 +135,7 @@ public class MainActivity extends Activity {
     private void acceptReply(String answer) {
         JSONArray r=state.optJSONArray("records"); JSONObject item=new JSONObject();
         Store.put(item,"participant",Store.target(state));Store.put(item,"round",state.optInt("turn")/state.optJSONArray("participants").length()+1);Store.put(item,"prompt",state.optString("pending"));Store.put(item,"reply",answer);Store.put(item,"time",System.currentTimeMillis());r.put(item);
-        int turn=state.optInt("turn")+1;Store.put(state,"turn",turn);Store.put(state,"status",turn>=state.optInt("rounds")*state.optJSONArray("participants").length()?"COMPLETE":"READY");Store.put(state,"pending",Store.prompt(state));Store.put(state,"replyDraft","");Store.put(state,"candidate","");Store.put(state,"capture",false);Store.put(state,"notice","回复已保存。");
+        int turn=state.optInt("turn")+1;Store.put(state,"turn",turn);Store.put(state,"status",turn>=state.optInt("rounds")*state.optJSONArray("participants").length()?"COMPLETE":"READY");Store.put(state,"pending",Store.prompt(state));Store.put(state,"replyDraft","");Store.put(state,"candidate","");Store.put(state,"capture",false);Store.put(state,"diagRequested",false);Store.put(state,"diagnostics","");Store.put(state,"notice","回复已保存。");
         if(persist())render();
     }
     private void records(JSONObject s) {JSONArray a=s.optJSONArray("records"); if(a==null)return;for(int i=0;i<a.length();i++){JSONObject r=a.optJSONObject(i);text("第 "+r.optInt("round")+" 轮 · "+r.optString("participant")+"\n"+r.optString("reply"));}}
