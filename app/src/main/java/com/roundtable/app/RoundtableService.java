@@ -14,6 +14,7 @@ public class RoundtableService extends AccessibilityService {
     static RoundtableService instance;
     private final Handler handler=new Handler(android.os.Looper.getMainLooper());
     private Attempt attempt;
+    private final SendTargetResolver<AccessibilityNodeInfo> sendResolver=new SendTargetResolver<>(new SendTree());
     private final Runnable poll=this::tickSafely;
     private static final long STABLE_MS=500;
 
@@ -81,11 +82,11 @@ public class RoundtableService extends AccessibilityService {
         boolean stable=target && now-a.stableSince>=STABLE_MS;
         boolean draft=snap.inputs.size()==1 && !inputText(snap.inputs.get(0)).isEmpty();
         boolean matches=snap.inputs.size()==1 && a.pending.equals(inputText(snap.inputs.get(0)));
-        boolean enabled=snap.sends.size()==1 && snap.sends.get(0).isEnabled();
+        boolean enabled=snap.sends.size()==1 && snap.sends.get(0).node.isEnabled();
         SendFlow.Action action=a.diagnostic?SendFlow.Action.WAIT:a.flow.next(now,target,snap.blocked,snap.truncated,snap.inputs.size(),draft,matches,snap.sends.size(),enabled,stable);
         String phase=a.diagnostic?"只读诊断":s.optString("sendPhase","等待页面");
         String reason=a.diagnostic?"仅采集控件结构，不输入、不发送":a.flow.reason;
-        String summary=phase+"；前台="+target+"；输入="+snap.inputs.size()+"；设置文字动作="+snap.setTextNodes+"；发送标签="+snap.sendLabels+"；可点击发送="+snap.sends.size()+"；输入核对="+matches;
+        String summary=phase+"；前台="+target+"；输入="+snap.inputs.size()+"；设置文字动作="+snap.setTextNodes+"；发送标签="+snap.sendLabels+"；解析后发送="+snap.sends.size()+"；输入核对="+matches;
         a.trace(summary,now);
         String data=diagnostics(a,phase,reason,target,snap,matches)+"\n采样变化：\n"+a.trace;
         if(a.diagnostic) {
@@ -113,9 +114,28 @@ public class RoundtableService extends AccessibilityService {
             if(!input.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT,args)) {fail(s,"输入接口未确认成功，请检查是否留下草稿；不会再次填入。");attempt=null;return;}
             a.lastKey="";a.stableSince=now;
         } else if(action==SendFlow.Action.CLICK) {
-            AccessibilityNodeInfo input=snap.inputs.get(0), send=snap.sends.get(0);
-            if(!input.refresh() || !send.refresh() || !a.pending.equals(inputText(input)) || !isInput(input) || !a.pkg.contentEquals(input.getPackageName()) || !a.pkg.contentEquals(send.getPackageName()) || !send.isVisibleToUser() || !send.isEnabled() || isInput(send) || !send.isClickable() || !UiLabels.isSend(send.getText(),send.getContentDescription())) {
-                fail(s,"点击前控件或输入内容发生变化，未点击发送。");attempt=null;return;
+            // Re-scan the live tree: a prior label/parent relationship must not authorize a changed button.
+            AccessibilityNodeInfo freshRoot=getRootInActiveWindow();
+            Snapshot fresh=new Snapshot();
+            if(freshRoot==null || !a.pkg.contentEquals(freshRoot.getPackageName())) {
+                fail(s,"点击前已离开目标 App，未点击发送。");attempt=null;return;
+            }
+            inspect(freshRoot,fresh,a.pkg,0);
+            if(fresh.blocked || fresh.truncated || fresh.inputs.size()!=1 || fresh.sends.size()!=1
+                    || !fresh.sends.get(0).node.equals(snap.sends.get(0).node)) {
+                fail(s,"点击前页面或发送控件关系发生变化，未点击发送。");attempt=null;return;
+            }
+            AccessibilityNodeInfo input=fresh.inputs.get(0);
+            SendControl control=fresh.sends.get(0);
+            AccessibilityNodeInfo send=control.node;
+            if(!input.refresh() || !control.label.refresh() || !send.refresh() || !a.pending.equals(inputText(input))
+                    || !isInput(input) || !a.pkg.contentEquals(input.getPackageName())
+                    || System.currentTimeMillis()>=a.deadline) {
+                fail(s,"点击前控件、输入或授权发生变化，未点击发送。");attempt=null;return;
+            }
+            SendTargetResolver.Result<AccessibilityNodeInfo> verified=sendResolver.resolve(control.label,a.pkg);
+            if(verified.target==null || !send.equals(verified.target)) {
+                fail(s,"点击前发送标签与可点击控件的关系无法再次确认，未点击发送。");attempt=null;return;
             }
             Store.put(s,"autoClickClaimed",true);Store.put(s,"sendPhase","已领取单次点击授权");Store.put(s,"notice",a.flow.reason);
             // Claim before clicking. No callbacks or subsequent events can claim another click.
@@ -149,8 +169,17 @@ public class RoundtableService extends AccessibilityService {
             if(visible) {
                 if(!input && UiLabels.blocked(n.getText(),n.getContentDescription()))out.blocked=true;
                 if(input)out.inputs.add(n);
-                if(label)out.sendLabels++;
-                if(label && n.isClickable())out.sends.add(n);
+                if(label) {
+                    out.sendLabels++;
+                    if(n.isClickable())out.directClickableLabels++;
+                    SendTargetResolver.Result<AccessibilityNodeInfo> resolved=sendResolver.resolve(n,pkg);
+                    if(out.sendResolutions.size()<8)out.sendResolutions.add(describeResolution(resolved));
+                    if(resolved.target!=null) {
+                        boolean duplicate=false;
+                        for(SendControl found:out.sends)if(found.node.equals(resolved.target))duplicate=true;
+                        if(!duplicate)out.sends.add(new SendControl(resolved.target,n,resolved.hops));
+                    }
+                }
             }
             if(visible && (n.isClickable() || input || label || setText)) {
                 android.graphics.Rect rect=new android.graphics.Rect();n.getBoundsInScreen(rect);
@@ -168,27 +197,68 @@ public class RoundtableService extends AccessibilityService {
         }
         for(int i=0;i<n.getChildCount() && !out.truncated;i++)inspect(n.getChild(i),out,pkg,depth+1);
     }
+    private static String describeResolution(SendTargetResolver.Result<AccessibilityNodeInfo> r) {
+        StringBuilder b=new StringBuilder(r.target==null?"未解析：":"已解析：").append(r.reason).append("；父级层数=").append(r.hops);
+        for(int i=0;i<r.chain.size();i++) {
+            AccessibilityNodeInfo n=r.chain.get(i);
+            android.graphics.Rect bounds=new android.graphics.Rect();n.getBoundsInScreen(bounds);
+            b.append("\n  层").append(i).append("：类型=").append(safeClass(n))
+                .append("；clickable=").append(n.isClickable()).append("；CLICK=").append(hasAction(n,AccessibilityNodeInfo.ACTION_CLICK))
+                .append("；可用=").append(n.isEnabled()).append("；区域=").append(bounds.toShortString());
+        }
+        return b.toString();
+    }
+    private static final class SendControl {
+        final AccessibilityNodeInfo node,label;
+        final int hops;
+        SendControl(AccessibilityNodeInfo node,AccessibilityNodeInfo label,int hops) {this.node=node;this.label=label;this.hops=hops;}
+    }
+    private static final class SendTree implements SendTargetResolver.Tree<AccessibilityNodeInfo> {
+        @Override public SendTargetResolver.Facts facts(AccessibilityNodeInfo n) {
+            SendTargetResolver.Facts f=new SendTargetResolver.Facts();
+            f.pkg=n.getPackageName()==null?"":n.getPackageName().toString();
+            f.visible=n.isVisibleToUser();f.enabled=n.isEnabled();
+            f.inputLike=n.isEditable() || hasAction(n,AccessibilityNodeInfo.ACTION_SET_TEXT);f.password=n.isPassword();
+            f.clickable=n.isClickable();f.clickAction=hasAction(n,AccessibilityNodeInfo.ACTION_CLICK);
+            f.sendLabel=!f.inputLike && !f.password && UiLabels.isSend(n.getText(),n.getContentDescription());
+            f.blocked=!f.inputLike && UiLabels.blocked(n.getText(),n.getContentDescription());
+            android.graphics.Rect b=new android.graphics.Rect();n.getBoundsInScreen(b);
+            f.bounds=new SendTargetResolver.Box(b.left,b.top,b.right,b.bottom);return f;
+        }
+        @Override public AccessibilityNodeInfo parent(AccessibilityNodeInfo n) {return n.getParent();}
+        @Override public List<AccessibilityNodeInfo> children(AccessibilityNodeInfo n) {
+            if(n.getChildCount()>64)return null;
+            List<AccessibilityNodeInfo> children=new ArrayList<>();
+            for(int i=0;i<n.getChildCount();i++)children.add(n.getChild(i));
+            return children;
+        }
+    }
     private static String safeClass(AccessibilityNodeInfo n) {
         String c=String.valueOf(n.getClassName());return c.matches("[A-Za-z0-9_.$]{1,120}")?c:"未知";
     }
     private String diagnostics(Attempt a,String phase,String reason,boolean target,Snapshot snap,boolean matches) {
-        StringBuilder b=new StringBuilder("AI 圆桌 0.2.1；Android ").append(android.os.Build.VERSION.RELEASE)
+        StringBuilder b=new StringBuilder("AI 圆桌 0.2.2；Android ").append(android.os.Build.VERSION.RELEASE)
             .append("\n目标：").append(a.pkg).append("\n步骤：").append(phase).append("\n判断：").append(reason)
             .append("\n目标在前台：").append(target).append("；控件树节点：").append(snap.nodes)
             .append("\n输入框：").append(snap.inputs.size()).append("；发送按钮：").append(snap.sends.size())
-            .append("；输入核对：").append(matches).append("\n可见 editable：").append(snap.editableNodes).append("；可见 SET_TEXT：").append(snap.setTextNodes).append("；发送标签（含不可点击）：").append(snap.sendLabels).append("\n登录/验证标记：").append(snap.blocked).append("；遍历截断：").append(snap.truncated);
+            .append("；输入核对：").append(matches).append("\n可见 editable：").append(snap.editableNodes).append("；可见 SET_TEXT：").append(snap.setTextNodes).append("；发送标签（含不可点击）：").append(snap.sendLabels).append("\n标签本身可点击：").append(snap.directClickableLabels).append("；解析后发送控件：").append(snap.sends.size()).append("\n登录/验证标记：").append(snap.blocked).append("；遍历截断：").append(snap.truncated);
+        for(String r:snap.sendResolutions)b.append("\n发送父级解析：").append(r);
         for(String c:snap.priorityControls)b.append("\n关键控件：").append(c);
         for(String c:snap.firstControls)b.append("\n前部控件：").append(c);
         for(String c:snap.lastControls)b.append("\n尾部控件：").append(c);
         return b.append("\n未记录输入正文、聊天内容、账户或未知控件名称。").toString();
     }
     private static class Snapshot {
-        final List<AccessibilityNodeInfo> inputs=new ArrayList<>(), sends=new ArrayList<>();
-        final List<String> priorityControls=new ArrayList<>(),firstControls=new ArrayList<>(),lastControls=new ArrayList<>(); int nodes,editableNodes,setTextNodes,sendLabels;boolean blocked,truncated;
+        final List<AccessibilityNodeInfo> inputs=new ArrayList<>();
+        final List<SendControl> sends=new ArrayList<>();
+        final List<String> priorityControls=new ArrayList<>(),firstControls=new ArrayList<>(),lastControls=new ArrayList<>(),sendResolutions=new ArrayList<>(); int nodes,editableNodes,setTextNodes,sendLabels,directClickableLabels;boolean blocked,truncated;
         String fingerprint() {
             StringBuilder b=new StringBuilder().append(nodes).append('/').append(inputs.size()).append('/').append(sends.size());
             for(AccessibilityNodeInfo n:inputs)b.append('/').append(n.getWindowId()).append('/').append(inputText(n).hashCode()).append('/').append(n.isShowingHintText());
-            for(AccessibilityNodeInfo n:sends)b.append('/').append(n.isEnabled()).append('/').append(n.getWindowId());
+            for(SendControl control:sends) {
+                android.graphics.Rect bounds=new android.graphics.Rect();control.node.getBoundsInScreen(bounds);
+                b.append('/').append(control.node.isEnabled()).append('/').append(control.node.getWindowId()).append('/').append(control.hops).append('/').append(bounds.toShortString());
+            }
             return b.toString();
         }
     }

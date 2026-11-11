@@ -33,7 +33,7 @@ public class MainActivity extends Activity {
         prompt=null; reply=null;
         ScrollView scroll=new ScrollView(this); body=new LinearLayout(this); body.setOrientation(LinearLayout.VERTICAL); body.setPadding(24,32,24,32); scroll.setFillViewport(true); scroll.addView(body); setContentView(scroll);
         scroll.setOnApplyWindowInsetsListener((v,i)->{v.setPadding(i.getSystemWindowInsetLeft(),i.getSystemWindowInsetTop(),i.getSystemWindowInsetRight(),i.getSystemWindowInsetBottom());return i;});
-        text("AI 圆桌 · 0.2.1 诊断版");
+        text("AI 圆桌 · 0.2.2 诊断版");
         text("每次发送前确认。自动操作未经真机验证。回复必须由你检查完整性。讨论保存在本机，转发会把内容交给所选 AI 服务。复制会覆盖剪贴板。");
         button("无障碍设置（可选；手动流程无需开启）",true,()->startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         String status=state.optString("status", "NONE");
