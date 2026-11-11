@@ -1,6 +1,19 @@
 # 真机测试安装包
 
-## 最新：0.2.1 诊断版
+## 最新：0.2.2 父级点击修正版
+
+[下载 0.2.2 APK](https://github.com/victorianoruben18-dot/ai-roundtable-android/raw/refs/heads/feat/android-mvp/downloads/ai-roundtable-0.2.2-debug.apk)
+
+来源代码提交：`a6d95989014c77ae40b082f3e5d9193d770f149b`。versionCode 4；签名与旧版相同，可覆盖更新并保留本地记录。
+
+针对已核对输入但发送标签不可点击的情况，在最多三层父级中查找独立可点击按钮，严格检查范围、唯一标签及其他操作控件；点击前重新核对页面和输入，仅尝试一次 ACTION_CLICK。不使用坐标点击或重发。
+
+请确认首页显示 0.2.2，无障碍服务开启。清除 ChatGPT 上一轮草稿，打开普通新聊天；回圆桌停止旧讨论，新建仅 ChatGPT 的 1 轮讨论，确认一次自动发送，留在 ChatGPT 最多 15 秒后返回。若失败，请复制“自动发送诊断”；新日志会显示发送标签到点击父级的解析结果。若已经发出，不要重复发送。
+
+38 项 JVM 测试、APK 构建、Lint（无错误）及签名校验通过。尚未经 0.2.2 真机验证，不能宣称实际发送成功。
+
+
+## 历史：0.2.1 诊断版
 
 [下载 0.2.1 APK](https://github.com/victorianoruben18-dot/ai-roundtable-android/raw/refs/heads/feat/android-mvp/downloads/ai-roundtable-0.2.1-debug.apk)
 
