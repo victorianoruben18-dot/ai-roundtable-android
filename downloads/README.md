@@ -1,6 +1,18 @@
 # 真机测试安装包
 
-## 当前版本：0.2.0 诊断版
+## 最新：0.2.1 诊断版
+
+[下载 0.2.1 APK](https://github.com/victorianoruben18-dot/ai-roundtable-android/raw/refs/heads/feat/android-mvp/downloads/ai-roundtable-0.2.1-debug.apk)
+
+来源提交：`23ca8ce382d01fe4a1f24161fff309caff3b5bf6`；versionCode 3。签名与旧版相同，可覆盖更新。
+
+本次隔离“自动发送诊断”与“只读诊断”，延长输入区采样，并记录控件的 SET_TEXT/CLICK 能力。增加可见、可用、非密码且明确支持 SET_TEXT 的唯一自定义输入框候选。根因仍需真机结果确认，不能宣称发送已成功。
+
+安装后先将本服务关闭再开启。请用新讨论、ChatGPT 普通新聊天，确认一次并在目标 App 等待最多 15 秒。若失败，返回圆桌点“复制自动发送诊断”，把内容发来；无需先运行只读诊断。已经发送的问题不要重复发送。
+
+23 项 JVM 测试、构建、静态检查及签名验证通过；未执行真机验证。
+
+## 历史版本：0.2.0 诊断版
 
 [下载 0.2.0 APK](https://github.com/victorianoruben18-dot/ai-roundtable-android/raw/refs/heads/feat/android-mvp/downloads/ai-roundtable-0.2-debug.apk)
 
