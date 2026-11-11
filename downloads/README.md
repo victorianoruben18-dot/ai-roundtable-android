@@ -1,6 +1,19 @@
 # 真机测试安装包
 
-## 最新：0.2.2 父级点击修正版
+## 最新：0.2.3 DeepSeek 触控外框修正版
+
+[下载 0.2.3 APK](https://github.com/victorianoruben18-dot/ai-roundtable-android/raw/refs/heads/feat/android-mvp/downloads/ai-roundtable-0.2.3-debug.apk)
+
+来源代码提交：`3f6d79f5cc16064928f248a597f5e6d97401b5fc`。versionCode 5，签名与旧版一致，可直接覆盖更新。
+
+修正小发送图标的大触控包装层被旧面积比例规则拒绝的问题。采用不超过 96dp 的独立按钮宿主限制，要求同包、同窗口、一个明确发送标签和一个可执行点击控件；检查通过后才会点击一次。不会按屏幕坐标点击。
+
+这版 DeepSeek 仍需临时手动聚焦：确认首页显示 0.2.3、服务开启，清空 DeepSeek 旧草稿；回圆桌停止旧讨论，新建只选 DeepSeek、1 轮讨论。确认自动发送、跳转后立即点一次输入框，不输入或手动发送；等待最多 15 秒再返回。如果仍失败，请复制“自动发送诊断”。若已发出，不要重复发送。
+
+48 项 JVM 测试、构建、Lint（无错误）、签名验证通过。尚无 0.2.3 真机成功结果；DeepSeek 自动聚焦和回复自动获取也未完成验证。
+
+
+## 历史：0.2.2 父级点击修正版
 
 [下载 0.2.2 APK](https://github.com/victorianoruben18-dot/ai-roundtable-android/raw/refs/heads/feat/android-mvp/downloads/ai-roundtable-0.2.2-debug.apk)
 
