@@ -72,7 +72,10 @@ public class RoundtableService extends AccessibilityService {
         AccessibilityNodeInfo root=getRootInActiveWindow();
         boolean target=root!=null && a.pkg.contentEquals(root.getPackageName());
         Snapshot snap=new Snapshot();
-        if(target)inspect(root,snap,a.pkg,0);
+        if(target) {
+            if(a.targetSince==0)a.targetSince=now;
+            inspect(root,snap,a.pkg,0);
+        }
         String key=target?snap.fingerprint():"outside";
         if(!key.equals(a.lastKey)) {a.lastKey=key;a.stableSince=now;}
         boolean stable=target && now-a.stableSince>=STABLE_MS;
@@ -82,50 +85,85 @@ public class RoundtableService extends AccessibilityService {
         SendFlow.Action action=a.diagnostic?SendFlow.Action.WAIT:a.flow.next(now,target,snap.blocked,snap.truncated,snap.inputs.size(),draft,matches,snap.sends.size(),enabled,stable);
         String phase=a.diagnostic?"只读诊断":s.optString("sendPhase","等待页面");
         String reason=a.diagnostic?"仅采集控件结构，不输入、不发送":a.flow.reason;
-        Store.put(s,"diagnostics",diagnostics(a,phase,reason,target,snap,matches));
+        String summary=phase+"；前台="+target+"；输入="+snap.inputs.size()+"；设置文字动作="+snap.setTextNodes+"；发送标签="+snap.sendLabels+"；可点击发送="+snap.sends.size()+"；输入核对="+matches;
+        a.trace(summary,now);
+        String data=diagnostics(a,phase,reason,target,snap,matches)+"\n采样变化：\n"+a.trace;
         if(a.diagnostic) {
-            if((target && stable) || now>=a.deadline) {
-                Store.put(s,"diagRequested",false); Store.put(s,"notice",target?"只读诊断完成，请返回查看或复制诊断信息。":"诊断超时，未读取其他应用。");
+            int score=target?10+snap.inputs.size()*100+snap.setTextNodes*20+snap.sendLabels*30:0;
+            if(score>=a.bestScore) {a.bestScore=score;a.bestData=data;}
+            data="只读探测代表样本（优先保留包含输入区的样本）：\n"+a.bestData+"\n最新采样变化：\n"+a.trace;
+        }
+        DiagnosticLog.record(s,a.diagnostic,data);
+        if(a.diagnostic) {
+            if(DiagnosticLog.finishProbe(now,a.deadline,a.targetSince,target && stable,snap.inputs.size())) {
+                Store.put(s,"diagRequested",false); Store.put(s,"notice",target?"只读诊断完成，请复制只读诊断；自动发送记录另行保留。":"只读探测已结束，保留目标 App 代表样本，未读取其他应用。");
                 Store.save(this,s);attempt=null;return;
             }
         } else if(action==SendFlow.Action.ABORT) { fail(s,a.flow.reason);attempt=null;return; }
         else if(action==SendFlow.Action.FILL) {
-            Store.put(s,"status","SENDING");Store.put(s,"sendPhase","等待输入和按钮更新");Store.put(s,"notice",a.flow.reason);
+            Store.put(s,"status","SENDING");Store.put(s,"autoFillClaimed",true);Store.put(s,"sendPhase","等待输入和按钮更新");Store.put(s,"notice",a.flow.reason);
             // Durable boundary before the only text write. A failed write is never retried.
             if(!Store.save(this,s)) {attempt=null;return;}
             AccessibilityNodeInfo input=snap.inputs.get(0);
-            if(!input.refresh() || !input.isEditable() || !input.isVisibleToUser() || !input.isEnabled() || !a.pkg.contentEquals(input.getPackageName()) || !inputText(input).isEmpty()) {
+            if(!input.refresh() || !isInput(input) || !a.pkg.contentEquals(input.getPackageName()) || !inputText(input).isEmpty()) {
                 fail(s,"填入前页面或草稿发生变化，已暂停。");attempt=null;return;
             }
+            Store.put(s,"autoFillAttempted",true);if(!Store.save(this,s)){attempt=null;return;}
             Bundle args=new Bundle();args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,a.pending);
             if(!input.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT,args)) {fail(s,"输入接口未确认成功，请检查是否留下草稿；不会再次填入。");attempt=null;return;}
             a.lastKey="";a.stableSince=now;
         } else if(action==SendFlow.Action.CLICK) {
             AccessibilityNodeInfo input=snap.inputs.get(0), send=snap.sends.get(0);
-            if(!input.refresh() || !send.refresh() || !a.pending.equals(inputText(input)) || !input.isEditable() || !input.isVisibleToUser() || !input.isEnabled() || !a.pkg.contentEquals(input.getPackageName()) || !a.pkg.contentEquals(send.getPackageName()) || !send.isVisibleToUser() || !send.isEnabled() || send.isEditable() || !send.isClickable() || !UiLabels.isSend(send.getText(),send.getContentDescription())) {
+            if(!input.refresh() || !send.refresh() || !a.pending.equals(inputText(input)) || !isInput(input) || !a.pkg.contentEquals(input.getPackageName()) || !a.pkg.contentEquals(send.getPackageName()) || !send.isVisibleToUser() || !send.isEnabled() || isInput(send) || !send.isClickable() || !UiLabels.isSend(send.getText(),send.getContentDescription())) {
                 fail(s,"点击前控件或输入内容发生变化，未点击发送。");attempt=null;return;
             }
-            Store.put(s,"sendPhase","已领取单次点击授权");Store.put(s,"notice",a.flow.reason);
+            Store.put(s,"autoClickClaimed",true);Store.put(s,"sendPhase","已领取单次点击授权");Store.put(s,"notice",a.flow.reason);
             // Claim before clicking. No callbacks or subsequent events can claim another click.
             if(!Store.save(this,s)) {attempt=null;return;}
+            Store.put(s,"autoClickAttempted",true);if(!Store.save(this,s)){attempt=null;return;}
             boolean clicked=send.performAction(AccessibilityNodeInfo.ACTION_CLICK);
             if(!clicked)fail(s,"发送接口未确认成功，请检查目标 App；不会重试点击。");
-            else {Store.put(s,"status","WAITING");Store.put(s,"sendPhase","已尝试点击一次");Store.put(s,"notice","已尝试点击发送；请核对是否发出，完整回复仍需你确认。");Store.save(this,s);}
+            else {Store.put(s,"status","WAITING");Store.put(s,"sendPhase","已尝试点击一次");Store.put(s,"notice","已尝试点击发送；请核对是否发出，完整回复仍需你确认。");Store.put(s,"lastAutoNotice","已尝试点击一次，请核对是否发出。");Store.save(this,s);}
             attempt=null;return;
         } else {Store.put(s,"notice",reason); if(!Store.save(this,s)){attempt=null;return;}}
         handler.postDelayed(poll,250);
     }
     private static String inputText(AccessibilityNodeInfo n) {return n.isShowingHintText() || n.getText()==null?"":n.getText().toString();}
-    private void fail(JSONObject s,String why) {Store.put(s,"status","UNCERTAIN");Store.put(s,"notice",why);Store.save(this,s);}
+    private void fail(JSONObject s,String why) {Store.put(s,"status","UNCERTAIN");Store.put(s,"notice",why);Store.put(s,"lastAutoNotice",why);Store.save(this,s);}
+    private static boolean hasAction(AccessibilityNodeInfo n, int id) {
+        for(AccessibilityNodeInfo.AccessibilityAction a:n.getActionList())if(a.getId()==id)return true;
+        return false;
+    }
+    private static boolean isInput(AccessibilityNodeInfo n) {
+        return NodeRules.input(n.isVisibleToUser(),n.isEnabled(),n.isPassword(),n.isEditable(),hasAction(n,AccessibilityNodeInfo.ACTION_SET_TEXT));
+    }
     private void inspect(AccessibilityNodeInfo n,Snapshot out,String pkg,int depth) {
         if(n==null)return;
         if(depth>50 || ++out.nodes>2000) {out.truncated=true;return;}
-        if(n.isVisibleToUser() && pkg.contentEquals(n.getPackageName())) {
-            if(!n.isEditable() && UiLabels.blocked(n.getText(),n.getContentDescription()))out.blocked=true;
-            if(n.isEditable() && n.isEnabled())out.inputs.add(n);
-            if(n.isClickable()) {
-                if(!n.isEditable() && UiLabels.isSend(n.getText(),n.getContentDescription()))out.sends.add(n);
-                if(out.controls.size()<10)out.controls.add("类型="+safeClass(n)+"；角色="+UiLabels.safeRole(n.getText(),n.getContentDescription())+"；可用="+n.isEnabled());
+        if(pkg.contentEquals(n.getPackageName())) {
+            boolean visible=n.isVisibleToUser(), setText=hasAction(n,AccessibilityNodeInfo.ACTION_SET_TEXT);
+            if(setText && visible)out.setTextNodes++;
+            if(n.isEditable() && visible)out.editableNodes++;
+            boolean input=isInput(n);
+            boolean label=!input && !n.isPassword() && UiLabels.isSend(n.getText(),n.getContentDescription());
+            if(visible) {
+                if(!input && UiLabels.blocked(n.getText(),n.getContentDescription()))out.blocked=true;
+                if(input)out.inputs.add(n);
+                if(label)out.sendLabels++;
+                if(label && n.isClickable())out.sends.add(n);
+            }
+            if(visible && (n.isClickable() || input || label || setText)) {
+                android.graphics.Rect rect=new android.graphics.Rect();n.getBoundsInScreen(rect);
+                String id=n.getViewIdResourceName();
+                if(id==null || !id.matches(java.util.regex.Pattern.quote(pkg)+":id/[A-Za-z_][A-Za-z0-9_]{0,80}"))id="无/隐藏";
+                String meta="类型="+safeClass(n)+"；id="+id+"；角色="+(input?"输入框":UiLabels.safeRole(n.getText(),n.getContentDescription()))
+                    +"；editable="+n.isEditable()+"；SET_TEXT="+setText+"；clickable="+n.isClickable()+"；CLICK="+hasAction(n,AccessibilityNodeInfo.ACTION_CLICK)
+                    +"；可用="+n.isEnabled()+"；hint="+n.isShowingHintText()+"；区域="+rect.toShortString();
+                if(input || label || setText) {if(out.priorityControls.size()<12)out.priorityControls.add(meta);}
+                else {
+                    if(out.firstControls.size()<4)out.firstControls.add(meta);
+                    out.lastControls.add(meta);if(out.lastControls.size()>8)out.lastControls.remove(0);
+                }
             }
         }
         for(int i=0;i<n.getChildCount() && !out.truncated;i++)inspect(n.getChild(i),out,pkg,depth+1);
@@ -134,17 +172,19 @@ public class RoundtableService extends AccessibilityService {
         String c=String.valueOf(n.getClassName());return c.matches("[A-Za-z0-9_.$]{1,120}")?c:"未知";
     }
     private String diagnostics(Attempt a,String phase,String reason,boolean target,Snapshot snap,boolean matches) {
-        StringBuilder b=new StringBuilder("AI 圆桌 0.2.0；Android ").append(android.os.Build.VERSION.RELEASE)
+        StringBuilder b=new StringBuilder("AI 圆桌 0.2.1；Android ").append(android.os.Build.VERSION.RELEASE)
             .append("\n目标：").append(a.pkg).append("\n步骤：").append(phase).append("\n判断：").append(reason)
             .append("\n目标在前台：").append(target).append("；控件树节点：").append(snap.nodes)
             .append("\n输入框：").append(snap.inputs.size()).append("；发送按钮：").append(snap.sends.size())
-            .append("；输入核对：").append(matches).append("\n登录/验证标记：").append(snap.blocked).append("；遍历截断：").append(snap.truncated);
-        for(String c:snap.controls)b.append("\n").append(c);
+            .append("；输入核对：").append(matches).append("\n可见 editable：").append(snap.editableNodes).append("；可见 SET_TEXT：").append(snap.setTextNodes).append("；发送标签（含不可点击）：").append(snap.sendLabels).append("\n登录/验证标记：").append(snap.blocked).append("；遍历截断：").append(snap.truncated);
+        for(String c:snap.priorityControls)b.append("\n关键控件：").append(c);
+        for(String c:snap.firstControls)b.append("\n前部控件：").append(c);
+        for(String c:snap.lastControls)b.append("\n尾部控件：").append(c);
         return b.append("\n未记录输入正文、聊天内容、账户或未知控件名称。").toString();
     }
     private static class Snapshot {
         final List<AccessibilityNodeInfo> inputs=new ArrayList<>(), sends=new ArrayList<>();
-        final List<String> controls=new ArrayList<>(); int nodes;boolean blocked,truncated;
+        final List<String> priorityControls=new ArrayList<>(),firstControls=new ArrayList<>(),lastControls=new ArrayList<>(); int nodes,editableNodes,setTextNodes,sendLabels;boolean blocked,truncated;
         String fingerprint() {
             StringBuilder b=new StringBuilder().append(nodes).append('/').append(inputs.size()).append('/').append(sends.size());
             for(AccessibilityNodeInfo n:inputs)b.append('/').append(n.getWindowId()).append('/').append(inputText(n).hashCode()).append('/').append(n.isShowingHintText());
@@ -154,7 +194,14 @@ public class RoundtableService extends AccessibilityService {
     }
     private static class Attempt {
         final long session,deadline;final int turn;final String pkg,pending;final boolean diagnostic;final SendFlow flow;
-        String lastKey="";long stableSince;
+        String lastKey="",lastSummary="",bestData="";long stableSince,targetSince;int bestScore=-1;
+        final StringBuilder trace=new StringBuilder();
+        void trace(String summary,long now) {
+            if(summary.equals(lastSummary))return;
+            lastSummary=summary;
+            trace.append(Math.max(0,15000-(deadline-now))).append("ms ").append(summary).append("\n");
+            if(trace.length()>3500)trace.delete(0,trace.indexOf("\n",trace.length()-3000)+1);
+        }
         Attempt(JSONObject s,boolean diag) {
             session=s.optLong("created");turn=s.optInt("turn");pkg=Store.pkg(Store.target(s));pending=s.optString("pending");diagnostic=diag;
             deadline=s.optLong(diag?"diagDeadline":"deadline");flow=new SendFlow(deadline);
